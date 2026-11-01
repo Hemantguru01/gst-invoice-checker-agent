@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Secrets
+.env
+
+# Runtime data (private invoices and generated reports)
+data/uploads/*
+!data/uploads/.gitkeep
+data/*.db
+!.streamlit/config.toml
+reports/*
+!reports/.gitkeep
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

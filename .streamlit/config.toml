@@ -1,0 +1,9 @@
+[server]
+maxUploadSize = 10   # MB; matches MAX_UPLOAD_MB on the backend
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#1d4ed8"

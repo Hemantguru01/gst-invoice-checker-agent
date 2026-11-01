@@ -1,0 +1,24 @@
+# Backend
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.33
+pydantic==2.14.2
+pydantic-settings==2.16.2
+
+# Documents & OCR
+PyMuPDF==2.0
+Pillow==13.0.0
+rapidocr_onnxruntime==1.4.4
+# Optional alternative OCR engine (requires the Tesseract binary):
+# pytesseract==0.3.13
+
+# LLM (optional at runtime; app works without an API key)
+anthropic==2.3.0
+
+# Frontend
+streamlit==1.66.1
+requests>=2.32
+
+# Testing
+pytest==9.2.0
+httpx==0.28.1

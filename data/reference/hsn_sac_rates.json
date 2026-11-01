@@ -1,0 +1,39 @@
+{
+  "metadata": {
+    "name": "Sample HSN/SAC GST rate reference",
+    "version": "2025.09-sample-v1",
+    "effective_from": "2025-09-22",
+    "last_reviewed": "2026-11-02",
+    "source": "Compiled for this project from the publicly available CBIC GST goods and services rate schedules as understood by the dataset author, including the rate rationalisation effective 22 September 2025. Entries were NOT verified line-by-line against the official notification text.",
+    "legal_status": "NOT LEGALLY AUTHORITATIVE. Demonstration dataset only. Verify every rate against the current CBIC notifications (https://cbic-gst.gov.in) before relying on it.",
+    "confidence_levels": {
+      "high": "Long-standing standard rate with no known conditions; mismatches are reported as errors.",
+      "low": "Rate changed recently, depends on conditions (packaging, value threshold, ITC option, exemption) or could not be confirmed; any check against it is sent to manual review."
+    },
+    "matching": "Invoice codes are matched to the longest code prefix in this file (e.g. 84713010 matches 8471)."
+  },
+  "entries": [
+    {"code": "998313", "type": "SAC", "description": "IT consulting and support services", "gst_rate": 18, "confidence": "high"},
+    {"code": "998314", "type": "SAC", "description": "IT design and development services", "gst_rate": 18, "confidence": "high"},
+    {"code": "998315", "type": "SAC", "description": "Hosting and IT infrastructure provisioning services", "gst_rate": 18, "confidence": "high"},
+    {"code": "998316", "type": "SAC", "description": "IT infrastructure and network management services", "gst_rate": 18, "confidence": "high"},
+    {"code": "998222", "type": "SAC", "description": "Accounting and bookkeeping services", "gst_rate": 18, "confidence": "high"},
+    {"code": "998361", "type": "SAC", "description": "Advertising services", "gst_rate": 18, "confidence": "high"},
+    {"code": "997212", "type": "SAC", "description": "Rental or leasing of non-residential property", "gst_rate": 18, "confidence": "high"},
+    {"code": "998211", "type": "SAC", "description": "Legal advisory and representation services", "gst_rate": 18, "confidence": "low", "notes": "Services by advocates to business entities are generally under reverse charge."},
+    {"code": "996511", "type": "SAC", "description": "Road transport services of goods (GTA)", "gst_rate": 5, "confidence": "low", "notes": "Rate depends on the ITC option chosen by the transporter (5% or 12%/18%)."},
+    {"code": "996331", "type": "SAC", "description": "Restaurant services", "gst_rate": 5, "confidence": "low", "notes": "Rate depends on premises / hotel tariff conditions."},
+    {"code": "8471", "type": "HSN", "description": "Computers and data processing units", "gst_rate": 18, "confidence": "high"},
+    {"code": "8443", "type": "HSN", "description": "Printers and printing machinery", "gst_rate": 18, "confidence": "high"},
+    {"code": "8517", "type": "HSN", "description": "Telephone sets including mobile phones; networking equipment", "gst_rate": 18, "confidence": "high"},
+    {"code": "8523", "type": "HSN", "description": "Storage media (SSDs, flash drives, memory cards)", "gst_rate": 18, "confidence": "high"},
+    {"code": "8504", "type": "HSN", "description": "Transformers, converters, UPS, power supplies", "gst_rate": 18, "confidence": "high"},
+    {"code": "9403", "type": "HSN", "description": "Other furniture and parts", "gst_rate": 18, "confidence": "high"},
+    {"code": "3923", "type": "HSN", "description": "Plastic articles for packing of goods", "gst_rate": 18, "confidence": "high"},
+    {"code": "8415", "type": "HSN", "description": "Air conditioning machines", "gst_rate": 18, "confidence": "low", "notes": "Reduced from 28% in the September 2025 rationalisation; confirm effective date for the invoice."},
+    {"code": "3004", "type": "HSN", "description": "Medicaments in measured doses", "gst_rate": 5, "confidence": "low", "notes": "Several sub-headings have specific rates or exemptions."},
+    {"code": "1006", "type": "HSN", "description": "Rice", "gst_rate": 5, "confidence": "low", "notes": "Rate depends on whether it is pre-packaged and labelled."},
+    {"code": "0401", "type": "HSN", "description": "Fresh milk and cream (not concentrated)", "gst_rate": 0, "confidence": "high", "notes": "Fresh milk is exempt (nil rate)."},
+    {"code": "4820", "type": "HSN", "description": "Registers, notebooks, stationery of paper", "gst_rate": 18, "confidence": "low", "notes": "Exercise books and notebooks have specific rates; verify the sub-heading."}
+  ]
+}
