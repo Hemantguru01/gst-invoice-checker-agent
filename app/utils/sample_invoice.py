@@ -46,6 +46,8 @@ class SampleInvoice:
     lines: list[SampleLine]
     summary: list[tuple[str, str]] = field(default_factory=list)
     amount_in_words: str = ""
+    note: str = ""  # e.g. an export / LUT declaration printed above the footer
+    rows_per_page: int | None = None  # split the item table across pages (header repeated)
 
 
 def render_pdf(inv: SampleInvoice) -> bytes:
@@ -59,6 +61,13 @@ def render_pdf(inv: SampleInvoice) -> bytes:
     def rtext(x_right: float, y: float, s: str, size: float = 9, fontname: str = font) -> None:
         width = fitz.get_text_length(s, fontname=fontname, fontsize=size)
         page.insert_text((x_right - width, y), s, fontsize=size, fontname=fontname)
+
+    def table_header(y: float) -> None:
+        page.draw_rect(fitz.Rect(38, y - 12, 557, y + 4), color=(0.6, 0.6, 0.6))
+        for x, h in cols:
+            text(x, y, h, 9, bold)
+        for x, h in rcols:
+            rtext(x, y, h, 9, bold)
 
     text(230, 50, "TAX INVOICE", 16, bold)
     text(40, 66, "SYNTHETIC SAMPLE - NOT A REAL INVOICE", 7)
@@ -87,12 +96,15 @@ def render_pdf(inv: SampleInvoice) -> bytes:
     y = 222
     cols = [(40, "S.No"), (70, "Description"), (265, "HSN/SAC"), (320, "Qty"), (350, "Unit")]
     rcols = [(445, "Rate"), (515, "Taxable Value"), (555, "GST %")]
-    page.draw_rect(fitz.Rect(38, y - 12, 557, y + 4), color=(0.6, 0.6, 0.6))
-    for x, h in cols:
-        text(x, y, h, 9, bold)
-    for x, h in rcols:
-        rtext(x, y, h, 9, bold)
+    table_header(y)
     for i, line in enumerate(inv.lines, start=1):
+        if inv.rows_per_page and i > 1 and (i - 1) % inv.rows_per_page == 0:
+            text(40, y + 22, "Continued on next page", 8)
+            text(480, 820, f"Page {doc.page_count}", 7.5)
+            page = doc.new_page(width=595, height=842)
+            text(40, 50, f"TAX INVOICE (continued)  {inv.invoice_number or ''}", 10, bold)
+            y = 80
+            table_header(y)
         y += 18
         text(40, y, str(i))
         text(70, y, line.description)
@@ -116,6 +128,9 @@ def render_pdf(inv: SampleInvoice) -> bytes:
     if inv.amount_in_words:
         y += 26
         text(40, y, f"Amount in words: {inv.amount_in_words}", 8.5)
+    if inv.note:
+        y += 20
+        text(40, y, inv.note, 8.5)
     text(40, 790, "Declaration: synthetic invoice generated for software testing.", 7.5)
     text(430, 790, "Authorised Signatory", 8.5)
     data = doc.tobytes()
@@ -225,9 +240,72 @@ def missing_fields_invoice() -> SampleInvoice:
     )
 
 
+def multi_rate_multipage_invoice() -> SampleInvoice:
+    """Two pages, two GST rates (18% and 5%), one CGST/SGST row per rate."""
+    return SampleInvoice(
+        supplier_name="Sahyadri Tech Solutions Pvt Ltd",
+        supplier_address="12, 4th Cross, Indiranagar, Bengaluru 560038",
+        supplier_gstin=SUPPLIER_KA, supplier_state="Karnataka (29)",
+        invoice_number="STS/25-26/0233", invoice_date="05-11-2025", place_of_supply="29-Karnataka",
+        recipient_name="Kaveri Retail Traders", recipient_address="88, MG Road, Mysuru 570001",
+        recipient_gstin=RECIPIENT_KA,
+        lines=[
+            SampleLine("Laptop 14 inch 16GB RAM", "8471", "1", "Nos", "50,000.00", "50,000.00", "18%"),
+            SampleLine("UPS 1kVA", "8504", "2", "Nos", "4,000.00", "8,000.00", "18%"),
+            SampleLine("Paracetamol 500mg strips", "3004", "100", "Nos", "20.00", "2,000.00", "5%"),
+            SampleLine("SSD 1TB external", "8523", "2", "Nos", "3,000.00", "6,000.00", "18%"),
+            SampleLine("Cough syrup 100ml", "3004", "50", "Nos", "40.00", "2,000.00", "5%"),
+        ],
+        summary=[("Taxable Value", "68,000.00"), ("CGST @ 9%", "5,760.00"), ("CGST @ 2.5%", "100.00"),
+                 ("SGST @ 9%", "5,760.00"), ("SGST @ 2.5%", "100.00"), ("Total Invoice Value", "79,720.00")],
+        rows_per_page=3,
+    )
+
+
+def discount_invoice() -> SampleInvoice:
+    """Inter-state, single rate, invoice-level discount shown before the taxable value."""
+    return SampleInvoice(
+        supplier_name="Mahalaxmi Office Systems LLP",
+        supplier_address="Unit 7, Andheri East, Mumbai 400069",
+        supplier_gstin=SUPPLIER_MH, supplier_state="Maharashtra (27)",
+        invoice_number="MOS/2025/1204", invoice_date="10-11-2025", place_of_supply="24-Gujarat",
+        recipient_name="Vadodara Print Hub", recipient_address="Alkapuri, Vadodara 390007",
+        recipient_gstin=RECIPIENT_GJ,
+        lines=[
+            SampleLine("Laser printer A4 duplex", "8443", "2", "Nos", "12,500.00", "25,000.00", "18%"),
+            SampleLine("SSD 1TB external", "8523", "5", "Nos", "2,000.00", "10,000.00", "18%"),
+        ],
+        summary=[("Sub Total", "35,000.00"), ("Less: Discount", "1,000.00"), ("Taxable Value", "34,000.00"),
+                 ("IGST @ 18%", "6,120.00"), ("Total Invoice Value", "40,120.00")],
+    )
+
+
+def export_invoice() -> SampleInvoice:
+    """Export of services under LUT: zero-rated, no IGST charged. Must not be auto-classified."""
+    return SampleInvoice(
+        supplier_name="Sahyadri Tech Solutions Pvt Ltd",
+        supplier_address="12, 4th Cross, Indiranagar, Bengaluru 560038",
+        supplier_gstin=SUPPLIER_KA, supplier_state="Karnataka (29)",
+        invoice_number="STS/EXP/0007", invoice_date="12-11-2025", place_of_supply="96-Other Country",
+        recipient_name="Northwind Analytics Ltd (Singapore)", recipient_address="1 Raffles Place, Singapore",
+        recipient_gstin=None,
+        lines=[SampleLine("Software development services", "998314", "100", "Hrs", "2,000.00", "2,00,000.00", "0%")],
+        summary=[("Taxable Value", "2,00,000.00"), ("IGST @ 0%", "0.00"), ("Total Invoice Value", "2,00,000.00")],
+        note="Supply meant for export under LUT without payment of integrated tax.",
+    )
+
+
+def ocr_confusable_gstin() -> str:
+    """Supplier GSTIN with one digit replaced by a look-alike letter (8 -> B), as OCR might read it."""
+    return SUPPLIER_KA.replace("4821", "4B21")
+
+
 SCENARIOS = {
     "valid_intra_state": valid_intra_state,
     "valid_inter_state": valid_inter_state,
     "invalid_gst_errors": invalid_invoice,
     "missing_fields": missing_fields_invoice,
+    "multi_rate_multipage": multi_rate_multipage_invoice,
+    "discount_inter_state": discount_invoice,
+    "export_under_lut": export_invoice,
 }

@@ -35,6 +35,27 @@ bytes → file_service.validate_upload (magic bytes, size, decode)
 
 `supplier GSTIN state code == place-of-supply state code` → intra-state (CGST + SGST); otherwise inter-state (IGST). If either side is unknown, the tool infers the supply type from the taxes charged, reports it as `MANUAL_REVIEW`, and records the inference under assumptions.
 
-## Tax amount check
+## Tax amount and invoice total checks
 
-Expected tax = Σ (line taxable value × line rate). The rate is the one printed on the line; for single-line invoices it is derived from the tax amounts, and otherwise the reference rate is used and recorded as an assumption. For intra-state supplies, CGST and SGST are each compared with half of the expected tax. Differences up to `ROUNDING_TOLERANCE` (₹1 by default) pass and are labelled as rounding.
+All tax and total checks use one set of recomputed figures (`ExpectedAmounts` in `app/validators/calculation.py`), so the expected values and differences in a report always come from the same source.
+
+- Taxable base = Σ line taxable values as printed (less an invoice-level discount, if any). Quantity × price errors are reported by their own check and are not corrected here.
+- Line rate = the rate printed on the line. If none is printed, the reference rate is used only for a **high-confidence** entry whose effective date covers the invoice date, and this is recorded as an assumption. The rate is **never derived from the tax charged**: comparing the tax with a rate worked back from that same tax would always pass. Without a usable rate, the tax check goes to manual review.
+- Expected CGST = expected SGST = round(Σ taxable × rate ÷ 2), and expected total GST = CGST + SGST. For inter-state supplies, IGST = round(Σ taxable × rate).
+- Two invoice-total checks, each labelled with its formula:
+  - `calc.invoice_total` (*vs printed components*): printed taxable value + printed CGST/SGST/IGST + round-off.
+  - `calc.invoice_total_expected` (*vs expected GST*): taxable base + expected GST + round-off.
+
+  Example (the audited sample): taxable ₹1,07,000; expected CGST and SGST ₹6,780 each; printed SGST ₹6,700. The printed components add up to ₹1,20,480 and the expected total is ₹1,20,560, so both checks fail against the printed total of ₹1,25,000, each with its own difference.
+
+Differences up to `ROUNDING_TOLERANCE` (₹1 by default) pass and are labelled as rounding. Special supplies (exports, SEZ, LUT) skip the domestic tax checks and go to manual review.
+
+## Invoice numbers
+
+`app/utils/invoice_number.py` keeps three forms apart:
+
+- **raw**: exactly as printed; stored for audit and never changed.
+- **display**: whitespace tidied around `/` and `-`.
+- **key**: upper case, spaces removed, dash variants turned into `-`, and `/` and `-` kept.
+
+The key is used for the Rule 46 format check and for duplicate detection: same supplier GSTIN, same key, and the same financial year (or an unknown one). A match is a WARNING; records are never merged. OCR word-space restoration skips tokens containing digits or separators, and the parser reads the invoice number from the unmodified OCR text.

@@ -9,6 +9,7 @@ Steps: upload -> extract -> validate GSTIN/tax -> list errors & warnings -> fina
 from __future__ import annotations
 
 import argparse
+import html
 import sys
 from pathlib import Path
 
@@ -41,10 +42,11 @@ def main() -> None:
 
     ex = upload["extraction"]
     inv = ex["invoice"]
-    print(f"STEP 2 - Extraction: status={ex['status']} method={ex['method']} ocr_engine={ex['ocr_engine']}")
+    print(f"STEP 2 - Extraction: status={ex['status']}")
+    print(f"  method: {ex['method_label']}")
     for key in ("supplier_name", "supplier_gstin", "recipient_name", "recipient_gstin", "invoice_number",
-                "invoice_date", "place_of_supply", "taxable_value", "cgst", "sgst", "igst", "round_off",
-                "total_invoice_value"):
+                "invoice_number_raw", "invoice_date", "place_of_supply", "discount", "taxable_value", "cgst",
+                "sgst", "igst", "round_off", "total_invoice_value"):
         print(f"  {key:20} {inv.get(key)}")
     for i, li in enumerate(inv["line_items"], 1):
         print(f"  line {i}: {li['description']} | HSN {li['hsn_sac']} | {li['quantity']} x {li['unit_price']} "
@@ -73,12 +75,23 @@ def main() -> None:
     print("STEP 5 - Final validation report")
     s = result["summary"]
     print(f"  OVERALL STATUS: {result['overall_status']}")
-    print(f"  checks={s['total_checks']} passed={s['passed']} errors={s['errors']} "
-          f"warnings={s['warnings']} manual_review={s['manual_review']}")
+    print(f"  checks={s['total_checks']} passed={s['passed']} errors={s['errors']} warnings={s['warnings']}")
+    print(f"  manual-review findings={s['manual_review']}  standing reminders={s['standing_reminders']}  "
+          f"human verification items={s['manual_verification_total']}")
     print(f"  {report['overall_explanation']}")
-    print(f"  explanations: {report['llm_note'] or 'rule-based'}")
+    print(f"  explanations: {report['explanation_mode']}")
+    for party, status in report["gstin_registration"].items():
+        print(f"  {party} GSTIN registration: {status}")
+    markdown = client.report_text(invoice_id, "markdown")
+    page = html.unescape(client.report_text(invoice_id, "html"))
+    cells = [s[k] for k in ("total_checks", "passed", "errors", "warnings", "manual_review",
+                            "standing_reminders", "manual_verification_total")]
+    agree = ("| " + " | ".join(map(str, cells)) + " |" in markdown
+             and "".join(f"<td>{v}</td>" for v in cells) in page
+             and all(c["message"] in markdown and c["message"] in page for c in report["checks"]))
+    print(f"  JSON / Markdown / HTML agree on counts and every finding: {'yes' if agree else 'NO'}")
     out = ROOT / "reports" / f"demo-{path.stem}.md"
-    out.write_text(client.report_text(invoice_id, "markdown"), encoding="utf-8")
+    out.write_text(markdown, encoding="utf-8")
     print(f"  Markdown report saved to {out.relative_to(ROOT)}")
     print(f"  JSON report:  {args.api}/invoices/{invoice_id}/report")
     print(f"  HTML report:  {args.api}/invoices/{invoice_id}/report?format=html")

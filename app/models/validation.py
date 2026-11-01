@@ -65,7 +65,13 @@ class ValidationSummary(BaseModel):
     passed: int
     errors: int
     warnings: int
-    manual_review: int
+    manual_review: int = Field(description="Automated findings the rule engine could not verify "
+                                           "(checks with status MANUAL_REVIEW). These drive NEEDS REVIEW.")
+    standing_reminders: int = Field(
+        default=0, description="Verification reminders that apply to every invoice because the tool can "
+                               "never automate them (GSTIN registration status, e-invoicing, reverse charge, "
+                               "official rate confirmation, OCR re-check)")
+    manual_verification_total: int = Field(default=0, description="manual_review + standing_reminders")
 
 
 class AgentStep(BaseModel):
@@ -81,12 +87,22 @@ class ValidationReport(BaseModel):
     summary: ValidationSummary
     overall_explanation: str
     checks: list[ValidationCheck]
-    manual_verification: list[str] = Field(default_factory=list)
+    manual_verification: list[str] = Field(default_factory=list,
+                                           description="manual_review_findings followed by standing_reminders")
+    manual_review_findings: list[str] = Field(default_factory=list)
+    standing_reminders: list[str] = Field(default_factory=list)
+    gstin_registration: dict[str, str] = Field(
+        default_factory=dict, description="Registration status per party; never reported as active without "
+                                          "an authorised live source")
     assumptions: list[str] = Field(default_factory=list)
     extraction: ExtractionResult
     reference_data_version: str
     llm_used: bool = False
     llm_model: str | None = None
     llm_note: str | None = None
+    explanation_mode: str = Field(
+        default="Rule-based explanations",
+        description="Where the explanation text came from (Claude or the rule-based fallback). "
+                    "Statuses always come from the rule engine.")
     agent_trace: list[AgentStep] = Field(default_factory=list)
     disclaimer: str = DISCLAIMER

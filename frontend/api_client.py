@@ -8,6 +8,8 @@ from typing import Any
 import requests
 
 DEFAULT_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
+# Sent as X-API-Key when the backend requires authentication. Read from the environment only.
+API_KEY = os.getenv("API_KEY") or None
 
 
 class APIError(Exception):
@@ -17,13 +19,15 @@ class APIError(Exception):
 
 
 class GSTApiClient:
-    def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: float = 180.0) -> None:
+    def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: float = 180.0, api_key: str | None = API_KEY) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._headers = {"X-API-Key": api_key} if api_key else {}
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         try:
-            response = requests.request(method, f"{self.base_url}{path}", timeout=self.timeout, **kwargs)
+            response = requests.request(method, f"{self.base_url}{path}", timeout=self.timeout,
+                                        headers=self._headers, **kwargs)
         except requests.ConnectionError as exc:
             raise APIError(f"Cannot reach the backend at {self.base_url}. Is the FastAPI server running?") from exc
         except requests.Timeout as exc:
@@ -63,3 +67,6 @@ class GSTApiClient:
 
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
         return self._request("GET", "/invoices", params={"limit": limit}).json()
+
+    def delete(self, invoice_id: str) -> None:
+        self._request("DELETE", f"/invoices/{invoice_id}")

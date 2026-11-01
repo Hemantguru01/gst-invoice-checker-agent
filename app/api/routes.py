@@ -5,12 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Body, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Path as PathParam, Query, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 
 from app.api.dependencies import get_invoice_service
 from app.core.config import get_settings
 from app.core.exceptions import InvalidFileError
+from app.core.security import REPORT_CSP, limit_expensive_requests, require_api_key
 from app.models.api import (
     ErrorResponse,
     HealthResponse,
@@ -25,7 +27,11 @@ from app.services.invoice_service import InvoiceService
 from app.services.report_service import to_html, to_markdown
 
 router = APIRouter()
-ERRORS = {code: {"model": ErrorResponse} for code in (400, 404, 413, 415, 422)}
+# Every invoice endpoint requires the API key when one is configured; /health stays open for probes.
+invoices = APIRouter(dependencies=[Depends(require_api_key)])
+ERRORS = {code: {"model": ErrorResponse} for code in (400, 401, 404, 413, 415, 422, 429, 503)}
+# Only server-generated UUIDs are accepted as invoice IDs.
+InvoiceId = PathParam(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
@@ -43,19 +49,22 @@ def health(service: InvoiceService = Depends(get_invoice_service)) -> HealthResp
     )
 
 
-@router.post("/invoices/upload", response_model=UploadResponse, status_code=201, responses=ERRORS,
-             tags=["invoices"], summary="Upload a PDF/PNG/JPG invoice and extract its fields")
+@invoices.post("/invoices/upload", response_model=UploadResponse, status_code=201, responses=ERRORS,
+               tags=["invoices"], summary="Upload a PDF/PNG/JPG invoice and extract its fields",
+               dependencies=[Depends(limit_expensive_requests)])
 async def upload_invoice(file: UploadFile = File(...),
                          service: InvoiceService = Depends(get_invoice_service)) -> UploadResponse:
     limit = service.settings.max_upload_bytes
     content = await file.read(limit + 1)  # read at most one byte over the limit
-    invoice_id, safe_name, extraction = service.upload(file.filename, content)
+    # OCR is CPU-bound: run it off the event loop so other requests are not blocked.
+    invoice_id, safe_name, extraction = await run_in_threadpool(service.upload, file.filename, content)
     return UploadResponse(invoice_id=invoice_id, original_filename=safe_name, extraction=extraction)
 
 
-@router.post("/invoices/{invoice_id}/validate", response_model=ValidateResponse, responses=ERRORS,
-             tags=["invoices"], summary="Run the rule engine and agent; optionally with corrected data")
-def validate_invoice(invoice_id: str, request: ValidateRequest | None = Body(default=None),
+@invoices.post("/invoices/{invoice_id}/validate", response_model=ValidateResponse, responses=ERRORS,
+               tags=["invoices"], summary="Run the rule engine and agent; optionally with corrected data",
+               dependencies=[Depends(limit_expensive_requests)])
+def validate_invoice(invoice_id: str = InvoiceId, request: ValidateRequest | None = Body(default=None),
                      service: InvoiceService = Depends(get_invoice_service)) -> ValidateResponse:
     request = request or ValidateRequest()
     report = service.validate(invoice_id, request.invoice, request.use_llm)
@@ -63,7 +72,7 @@ def validate_invoice(invoice_id: str, request: ValidateRequest | None = Body(def
                             summary=report.summary, report_url=f"/invoices/{invoice_id}/report")
 
 
-@router.get("/invoices", response_model=list[HistoryItem], tags=["invoices"], summary="Processing history")
+@invoices.get("/invoices", response_model=list[HistoryItem], tags=["invoices"], summary="Processing history")
 def list_invoices(limit: int = Query(50, ge=1, le=500),
                   service: InvoiceService = Depends(get_invoice_service)) -> list[HistoryItem]:
     return [
@@ -75,8 +84,8 @@ def list_invoices(limit: int = Query(50, ge=1, le=500),
     ]
 
 
-@router.get("/invoices/{invoice_id}", response_model=InvoiceRecord, responses=ERRORS, tags=["invoices"])
-def get_invoice(invoice_id: str, service: InvoiceService = Depends(get_invoice_service)) -> InvoiceRecord:
+@invoices.get("/invoices/{invoice_id}", response_model=InvoiceRecord, responses=ERRORS, tags=["invoices"])
+def get_invoice(invoice_id: str = InvoiceId, service: InvoiceService = Depends(get_invoice_service)) -> InvoiceRecord:
     r = service.get(invoice_id)
     return InvoiceRecord(invoice_id=r.id, original_filename=r.original_filename, content_type=r.content_type,
                          size_bytes=r.size_bytes, uploaded_at=r.uploaded_at, extraction=r.extraction,
@@ -84,23 +93,34 @@ def get_invoice(invoice_id: str, service: InvoiceService = Depends(get_invoice_s
                          validated_at=r.validated_at)
 
 
-@router.get("/invoices/{invoice_id}/report", response_model=ValidationReport, responses=ERRORS,
-            tags=["invoices"], summary="Validation report as JSON, Markdown or HTML")
-def get_report(invoice_id: str, format: Literal["json", "markdown", "html"] = "json",
+@invoices.get("/invoices/{invoice_id}/report", response_model=ValidationReport, responses=ERRORS,
+              tags=["invoices"], summary="Validation report as JSON, Markdown or HTML")
+def get_report(invoice_id: str = InvoiceId, format: Literal["json", "markdown", "html"] = "json",
                service: InvoiceService = Depends(get_invoice_service)):
     report = service.report(invoice_id)
     if format == "markdown":
         return PlainTextResponse(to_markdown(report), media_type="text/markdown; charset=utf-8")
     if format == "html":
-        return HTMLResponse(to_html(report))
+        return HTMLResponse(to_html(report), headers={"Content-Security-Policy": REPORT_CSP})
     return report
 
 
-@router.get("/invoices/{invoice_id}/file", responses=ERRORS, tags=["invoices"],
-            summary="Download the originally uploaded file")
-def get_file(invoice_id: str, service: InvoiceService = Depends(get_invoice_service)) -> FileResponse:
+@invoices.get("/invoices/{invoice_id}/file", responses=ERRORS, tags=["invoices"],
+              summary="Download the originally uploaded file")
+def get_file(invoice_id: str = InvoiceId, service: InvoiceService = Depends(get_invoice_service)) -> FileResponse:
     record = service.get(invoice_id)
     path = Path(record.stored_path).resolve()
     if path.parent != service.file_store.root or not path.is_file():
         raise InvalidFileError("Stored file is unavailable.")
     return FileResponse(path, media_type=record.content_type, filename=record.original_filename)
+
+
+@invoices.delete("/invoices/{invoice_id}", status_code=204, responses=ERRORS, tags=["invoices"],
+                 summary="Delete the uploaded file, extracted data and reports for an invoice")
+def delete_invoice(invoice_id: str = InvoiceId,
+                   service: InvoiceService = Depends(get_invoice_service)) -> Response:
+    service.delete(invoice_id)
+    return Response(status_code=204)
+
+
+router.include_router(invoices)

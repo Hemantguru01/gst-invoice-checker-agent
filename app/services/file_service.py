@@ -117,6 +117,11 @@ class FileStore:
         path.write_bytes(content)
         return path
 
+    def delete(self, stored_path: str | Path) -> None:
+        path = Path(stored_path).resolve()
+        if path.parent == self.root and path.is_file():  # never delete outside the upload folder
+            path.unlink()
+
     def path_for(self, invoice_id: str, ext: str) -> Path:
         uuid.UUID(invoice_id)  # only server-generated IDs are accepted
         path = (self.root / f"{invoice_id}{ext}").resolve()

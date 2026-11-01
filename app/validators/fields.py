@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from datetime import date
 
 from app.models.invoice import ExtractionResult
 from app.models.validation import CheckCategory as Cat
 from app.models.validation import CheckStatus as St
 from app.models.validation import Severity
+from app.utils.invoice_number import rule46_problem
 from app.validators.base import RuleOutput, make_check
 
 _FIELD_LABELS = {
@@ -31,7 +31,6 @@ _FIELD_LABELS = {
 MANDATORY = ("supplier_name", "supplier_gstin", "invoice_number", "invoice_date", "line_items",
              "taxable_value", "total_invoice_value")
 
-_INVOICE_NO_RE = re.compile(r"^[A-Za-z0-9/\-]{1,16}$")
 
 
 def label(field: str) -> str:
@@ -89,11 +88,11 @@ def check_fields(extraction: ExtractionResult, today: date | None = None) -> Rul
                        "ask the supplier to add your GSTIN.",
         ))
 
-    if inv.invoice_number and not _INVOICE_NO_RE.match(inv.invoice_number):
+    problem = rule46_problem(inv.invoice_number)
+    if problem:
         out.add(make_check(
             "fields.invoice_number.format", Cat.FIELDS, "Invoice number format", St.WARNING,
-            f"Invoice number '{inv.invoice_number}' is longer than 16 characters or contains "
-            "characters other than letters, digits, '-' and '/'.",
+            f"Invoice number '{inv.invoice_number}': {problem}.",
             field="invoice_number", actual=inv.invoice_number,
             explanation="Rule 46 requires a consecutive serial number of up to 16 characters "
                         "using letters, digits, hyphen or slash.",

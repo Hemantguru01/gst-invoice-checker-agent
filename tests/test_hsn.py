@@ -49,9 +49,10 @@ def test_malformed_code_fails(hsn_ref):
     assert checks["hsn.line1.code"].status is CheckStatus.FAIL
 
 
-def test_unknown_code_warns_and_skips_rate(hsn_ref):
+def test_unknown_code_goes_to_manual_review_and_skips_rate(hsn_ref):
+    # Missing reference data must never become a PASS; it is a manual-review item.
     checks = checks_by_id(check_hsn(_single_line(hsn_sac="7323"), hsn_ref))
-    assert checks["hsn.line1.code"].status is CheckStatus.WARNING
+    assert checks["hsn.line1.code"].status is CheckStatus.MANUAL_REVIEW
     assert "not in the local reference dataset" in checks["hsn.line1.code"].message
     assert "hsn.line1.rate" not in checks
 

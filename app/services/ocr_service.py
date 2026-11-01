@@ -28,12 +28,14 @@ class TextSegment:
     x1: float
     y1: float
     confidence: float = 1.0
+    raw: str | None = None  # OCR output before word-space restoration
 
 
 @dataclass
 class TextLine:
     text: str
     confidence: float = 1.0
+    raw_text: str | None = None  # unmodified OCR text; identifiers are read from this
 
 
 class OCREngine(Protocol):
@@ -127,13 +129,15 @@ def segments_to_lines(segments: list[TextSegment], column_gap: float) -> list[Te
     lines: list[TextLine] = []
     for row in rows:
         row.sort(key=lambda s: s.x0)
-        parts = [row[0].text]
+        parts, raw_parts = [row[0].text], [row[0].raw or row[0].text]
         for prev, cur in zip(row, row[1:]):
-            parts.append("  " if cur.x0 - prev.x1 > column_gap else " ")
-            parts.append(cur.text)
+            gap = "  " if cur.x0 - prev.x1 > column_gap else " "
+            parts += [gap, cur.text]
+            raw_parts += [gap, cur.raw or cur.text]
         text = "".join(parts).strip()
+        raw = "".join(raw_parts).strip()
         if text:
-            lines.append(TextLine(text, min(s.confidence for s in row)))
+            lines.append(TextLine(text, min(s.confidence for s in row), raw if raw != text else None))
     return lines
 
 
@@ -148,14 +152,20 @@ def ocr_image(image: Image.Image, engine: OCREngine | None) -> list[TextLine]:
     except Exception as exc:  # noqa: BLE001
         raise ExtractionError(f"OCR failed ({engine.name}): {type(exc).__name__}") from exc
     for seg in segments:
+        seg.raw = seg.text
         seg.text = restore_word_spaces(seg.text)
     # OCR engines return phrases; treat any visible gap as a column break.
     return segments_to_lines(segments, column_gap=image.width * 0.012)
 
 
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z])(?=[A-Z])")
+_WORD_TOKEN = re.compile(r"^[A-Za-z]+[:.]?$")
 
 
 def restore_word_spaces(text: str) -> str:
-    """Some OCR models drop spaces ('TaxableValue', 'BillTo:'); split at lower→upper boundaries."""
-    return _CAMEL_BOUNDARY.sub(" ", text)
+    """Some OCR models drop spaces ('TaxableValue', 'BillTo:'); split at lower→upper boundaries.
+
+    Only tokens made of letters are touched, so identifiers containing digits, '/' or '-'
+    (invoice numbers, GSTINs, codes) are never altered."""
+    return " ".join(_CAMEL_BOUNDARY.sub(" ", tok) if _WORD_TOKEN.match(tok) else tok
+                    for tok in text.split(" "))

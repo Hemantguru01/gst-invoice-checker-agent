@@ -41,16 +41,18 @@ def missing_fields(invoice: InvoiceData) -> list[str]:
 class ExtractionService:
     def __init__(self, ocr_engine: OCREngine | None, llm: LLMClient | None = None,
                  state_codes: StateCodes | None = None, *, dpi: int = 200, max_pages: int = 10,
-                 llm_assisted: bool = True) -> None:
+                 llm_assisted: bool = True, max_render_pixels: int = 40_000_000) -> None:
         self.ocr_engine = ocr_engine
         self.llm = llm if llm_assisted else None
-        self.parser = InvoiceParser(state_codes or get_state_codes())
+        self.state_codes = state_codes or get_state_codes()
         self.dpi = dpi
         self.max_pages = max_pages
+        self.max_render_pixels = max_render_pixels
 
     def extract(self, content: bytes, kind: str) -> ExtractionResult:
         try:
-            document = read_document(content, kind, self.ocr_engine, dpi=self.dpi, max_pages=self.max_pages)
+            document = read_document(content, kind, self.ocr_engine, dpi=self.dpi, max_pages=self.max_pages,
+                                     max_render_pixels=self.max_render_pixels)
         except ExtractionError as exc:
             logger.info("Extraction failed: %s", exc.code)
             return ExtractionResult(status=ExtractionStatus.FAILED, method="none", error=exc.message,
@@ -60,12 +62,14 @@ class ExtractionService:
         if not text.strip():
             return ExtractionResult(
                 status=ExtractionStatus.FAILED, method=document.method, ocr_engine=document.ocr_engine,
-                page_count=document.page_count, missing_fields=list(TRACKED_FIELDS),
+                page_count=document.page_count, ocr_pages=document.ocr_pages, missing_fields=list(TRACKED_FIELDS),
                 error="No readable text was found in the document.",
             )
 
-        parsed = self.parser.parse(document.lines)
+        # One parser per document: it holds per-document state and extractions run in parallel threads.
+        parsed = InvoiceParser(self.state_codes).parse(document.lines)
         invoice = parsed.invoice
+        # Mixed documents cannot be mapped field by field, so their values are treated as OCR (less certain).
         source = FieldSource.PDF_TEXT if document.method == "pdf_text" else FieldSource.OCR
         sources = {f: source for f in TRACKED_FIELDS
                    if getattr(invoice, f) not in (None, [])}
@@ -82,7 +86,7 @@ class ExtractionService:
             if rejected:
                 warnings.append(f"Discarded {len(rejected)} AI-suggested value(s) not found in the document text.")
             if invoice.place_of_supply and not invoice.place_of_supply_code:
-                invoice.place_of_supply_code = self.parser.state_codes.code_for_name(invoice.place_of_supply)
+                invoice.place_of_supply_code = self.state_codes.code_for_name(invoice.place_of_supply)
 
         missing = missing_fields(invoice)
         mandatory_missing = [f for f in MANDATORY if f in missing]
@@ -98,4 +102,5 @@ class ExtractionService:
             warnings=warnings,
             raw_text_chars=len(text),
             page_count=document.page_count,
+            ocr_pages=document.ocr_pages,
         )

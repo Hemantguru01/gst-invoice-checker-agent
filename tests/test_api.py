@@ -94,8 +94,16 @@ def test_report_before_validation_is_404(client):
 
 
 def test_unknown_invoice_404(client):
-    assert client.get("/invoices/does-not-exist").status_code == 404
-    assert client.post("/invoices/does-not-exist/validate").status_code == 404
+    unknown = "00000000-0000-4000-8000-000000000000"
+    assert client.get(f"/invoices/{unknown}").status_code == 404
+    assert client.post(f"/invoices/{unknown}/validate").status_code == 404
+
+
+def test_malformed_invoice_id_is_rejected(client):
+    # Only server-generated UUIDs are accepted; anything else never reaches storage.
+    for bad in ("does-not-exist", "..%2F..%2Fetc", "1 OR 1=1"):
+        assert client.get(f"/invoices/{bad}").status_code in (404, 422)
+    assert client.get("/invoices/does-not-exist").status_code == 422
 
 
 def test_invalid_uploads(client):

@@ -12,6 +12,13 @@ from app.models.validation import Severity
 from app.services.reference_data import HSNEntry, HSNReference
 from app.validators.base import RuleOutput, make_check
 
+# Place-of-supply codes that mean the supply leaves the domestic intra/inter-state scheme.
+SPECIAL_POS_CODES = {"96": "export (other country)", "97": "other territory"}
+
+
+def is_special_supply(invoice: InvoiceData) -> bool:
+    return bool(invoice.supply_indicators) or invoice.place_of_supply_code in SPECIAL_POS_CODES
+
 # Slabs that have existed under GST (including pre-September-2025 slabs and special rates).
 KNOWN_SLABS = {Decimal(x) for x in ("0", "0.1", "0.25", "1.5", "3", "5", "6", "12", "18", "28", "40")}
 
@@ -49,7 +56,6 @@ def check_hsn(invoice: InvoiceData, reference: HSNReference) -> RuleOutput:
         f"GST rates are compared with the local reference dataset version {reference.version} "
         f"(effective {reference.effective_from.isoformat()}), which is not legally authoritative."
     )
-    before_effective = invoice.invoice_date is not None and invoice.invoice_date < reference.effective_from
 
     for index, item in enumerate(invoice.line_items, start=1):
         prefix = f"hsn.line{index}"
@@ -82,8 +88,8 @@ def check_hsn(invoice: InvoiceData, reference: HSNReference) -> RuleOutput:
         entry = reference.lookup(code)
         if entry is None:
             out.add(make_check(
-                f"{prefix}.code", Cat.HSN, f"{name} HSN/SAC code", St.WARNING,
-                f"Code {code} is not in the local reference dataset; its rate cannot be checked.",
+                f"{prefix}.code", Cat.HSN, f"{name} HSN/SAC code", St.MANUAL_REVIEW,
+                f"Code {code} is not in the local reference dataset; its GST rate was not verified.",
                 field="line_items.hsn_sac", actual=code,
                 explanation="The tool only knows the codes in its reference file. An unknown code is "
                             "not necessarily wrong, but its GST rate was not verified.",
@@ -97,6 +103,8 @@ def check_hsn(invoice: InvoiceData, reference: HSNReference) -> RuleOutput:
             f"{code} found in reference data ({entry.code}: {entry.description}).",
             field="line_items.hsn_sac", actual=code,
         ))
+        effective = entry.effective_from or reference.effective_from
+        before_effective = invoice.invoice_date is not None and invoice.invoice_date < effective
         out.extend(_rate_check(prefix, name, item, invoice, entry, before_effective, reference))
     return out
 
@@ -107,7 +115,9 @@ def _rate_check(prefix: str, name: str, item: LineItem, invoice: InvoiceData, en
     rate, rate_source = applied_rate(item, invoice)
     check_id = f"{prefix}.rate"
     title = f"{name} GST rate"
-    expected = f"{entry.gst_rate}% (reference {entry.code}, confidence: {entry.confidence})"
+    effective = entry.effective_from or reference.effective_from
+    expected = (f"{entry.gst_rate}% (reference {entry.code}, confidence: {entry.confidence}, effective "
+                f"{effective.isoformat()}, notification: {entry.notification_ref or 'not linked'})")
 
     if rate is None:
         out.add(make_check(
@@ -131,8 +141,8 @@ def _rate_check(prefix: str, name: str, item: LineItem, invoice: InvoiceData, en
     if before_effective:
         out.add(make_check(
             check_id, Cat.HSN, title, St.MANUAL_REVIEW,
-            f"Invoice is dated before the reference data's effective date "
-            f"({reference.effective_from.isoformat()}); the applicable rate may differ.",
+            f"Invoice is dated before this reference entry's effective date "
+            f"({effective.isoformat()}); the applicable rate may differ.",
             field="line_items.gst_rate", expected=expected, actual=f"{rate}%",
             explanation="GST rates changed over time (notably on 22 September 2025). The reference "
                         "data only describes rates from its effective date onwards.",
@@ -141,6 +151,18 @@ def _rate_check(prefix: str, name: str, item: LineItem, invoice: InvoiceData, en
         return out
 
     matches = rate == entry.gst_rate
+    if is_special_supply(invoice) and not matches:
+        out.add(make_check(
+            check_id, Cat.HSN, title, St.MANUAL_REVIEW,
+            f"Applied rate {rate}% ({rate_source}) differs from the domestic reference rate {entry.gst_rate}%, "
+            "but the invoice is marked as an export / SEZ / LUT supply, which may be zero-rated.",
+            field="line_items.gst_rate", expected=expected, actual=f"{rate}%",
+            explanation="Zero-rated supplies (exports, supplies to SEZ units) can legitimately show 0% or "
+                        "be made without payment of tax under a LUT or bond. The domestic rate does not apply "
+                        "automatically.",
+            suggestion="Confirm the zero-rating conditions (LUT/bond, SEZ authorisation, proof of export).",
+        ))
+        return out
     if entry.confidence != "high":
         note = f" Note: {entry.notes}" if entry.notes else ""
         out.add(make_check(
@@ -155,7 +177,8 @@ def _rate_check(prefix: str, name: str, item: LineItem, invoice: InvoiceData, en
     elif matches:
         out.add(make_check(
             check_id, Cat.HSN, title, St.PASS,
-            f"Applied rate {rate}% ({rate_source}) matches the reference rate.",
+            f"Applied rate {rate}% ({rate_source}) matches the local reference rate "
+            f"(dataset {reference.version}, not legally authoritative).",
             field="line_items.gst_rate", expected=expected, actual=f"{rate}%",
         ))
     else:

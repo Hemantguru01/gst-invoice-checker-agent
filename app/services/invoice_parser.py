@@ -15,13 +15,21 @@ from functools import lru_cache
 from app.models.invoice import InvoiceData, LineItem
 from app.services.ocr_service import TextLine
 from app.services.reference_data import StateCodes
+from app.utils.invoice_number import normalize_invoice_number
 from app.utils.money import parse_amount
 
 LOW_CONFIDENCE = 0.85
 
 _GSTIN_LABEL = re.compile(r"\bGST(?:IN)?(?:\s*/\s*UIN)?(?:\s*(?:No\.?|Number))?\s*[:\-]?\s*([A-Z0-9]{10,20})\b", re.I)
-_INVOICE_NO = re.compile(r"\b(?:Invoice|Inv|Bill)\s*(?:No\.?|Number|#)\s*[:\-]?\s*([A-Za-z0-9/\-]+)", re.I)
-_DATE_LABEL = re.compile(r"\b(?:Invoice\s*|Inv\.?\s*|Bill\s*)?Date(?:\s*of\s*Invoice)?\s*[:\-]?\s*"
+# The value may contain single spaces and spaced separators ("INV / 2026 / 001", "GST 001"). It ends at a
+# column gap (two spaces) or where the next label starts, so neighbouring fields are not swallowed.
+_NEXT_LABEL = (r"(?:Invoice|Inv|Date|Dated|Dt|Bill|Place|GSTIN|GST\s*(?:No|IN)|State|PO|Order|Due|Page|"
+               r"Ref|Challan|Vehicle|Mode|E-?Way|Reverse|Original|Duplicate)\b")
+_INVOICE_NO = re.compile(
+    r"\b(?:Invoice|Inv|Bill)\.?\s*(?:No\.?|Number|#)\s*[:\-]?\s*"
+    r"([A-Za-z0-9](?:[A-Za-z0-9]|[ ]?[/\-\u2010-\u2014\u2212][ ]?(?=[A-Za-z0-9])|[/\-\u2010-\u2014\u2212]|"
+    r"[ ](?!" + _NEXT_LABEL + r")(?=[A-Za-z0-9]))*)", re.I)
+_DATE_LABEL = re.compile(r"\b(?:Invoice\s*|Inv\.?\s*|Bill\s*)?Dated?(?:\s*of\s*Invoice)?\s*[:\-]?\s*"
                          r"(\d{1,4}[\-/.]\d{1,2}[\-/.]\d{2,4}|\d{1,2}[\s\-/][A-Za-z]{3,9}[\s\-/,]+\d{4})", re.I)
 _POS = re.compile(r"\bPlace\s*of\s*Supply\s*[:\-]?\s*(.+)$", re.I)
 _NUMBER_TOKEN = re.compile(r"-?\d[\d,]*(?:\.\d+)?\s*%?")
@@ -37,7 +45,9 @@ _AMOUNT_LABELS: dict[str, tuple[str, ...]] = {
     "sgst": ("sgst", "utgst"),
     "igst": ("igst",),
     "round_off": ("round off", "round-off", "rounding"),
+    "discount": ("less discount", "discount"),
 }
+_TAX_HEADS = ("cgst", "sgst", "igst")
 _AMOUNT_EXCLUDE = {
     "total_invoice_value": ("tax", "words"),
     "taxable_value": (),
@@ -45,8 +55,28 @@ _AMOUNT_EXCLUDE = {
     "sgst": ("total", "rate"),
     "igst": ("total", "rate"),
     "round_off": (),
+    "discount": ("%",),
 }
-_SUMMARY_START = re.compile(r"\b(taxable value|sub\s*total|cgst|sgst|igst|total)\b", re.I)
+_SUMMARY_START = re.compile(r"\b(taxable value|sub\s*total|cgst|sgst|igst|total|discount)\b", re.I)
+
+# Wording that marks a supply outside the normal intra/inter-state scheme.
+_SPECIAL_SUPPLY = re.compile(
+    r"\b(export(?:s|ed)?\s+of\s+(?:goods|services)|export\s+invoice|SEZ|special\s+economic\s+zone|"
+    r"deemed\s+exports?|LUT|letter\s+of\s+undertaking|under\s+bond|zero[\s-]?rated|"
+    r"without\s+payment\s+of\s+(?:integrated\s+)?tax)\b", re.I)
+_EXPORT_POS = re.compile(r"^\s*96\b|other\s+countr|outside\s+india|foreign\s+country", re.I)
+
+# Item-table header words -> column role, in the order they appear after the HSN/SAC column.
+_COLUMN_ROLES: tuple[tuple[str, str], ...] = (
+    (r"\b(?:gst|igst|cgst|sgst|tax)\s*(?:rate|%)|\brate\s*%|\bgst\b", "gst_rate"),
+    (r"\b(?:cgst|sgst|igst|utgst|tax)\s*(?:amt|amount)\b", "tax_amount"),
+    (r"\bqty\b|\bquantity\b", "quantity"),
+    (r"\bdisc(?:ount)?\.?\s*%", "discount_pct"),
+    (r"\bdisc(?:ount)?\b", "discount"),
+    (r"\btaxable\s*(?:value|amount|amt)\b", "taxable_value"),
+    (r"\bunit\s*price\b|\bprice\b|\brate\b", "unit_price"),
+    (r"\btotal\b|\bamount\b|\bvalue\b", "amount"),
+)
 
 
 @dataclass
@@ -100,9 +130,35 @@ def _after_label(text: str, label_pattern: str) -> str | None:
     return value or None
 
 
+def _column_roles(header: str) -> list[str] | None:
+    """Numeric column roles after the HSN/SAC column, in order, or None if none are recognised."""
+    match = _TABLE_HEADER.search(header)
+    tail = header[match.end():] if match else header
+    tail = re.sub(r"^\s*/\s*(?:SAC|HSN)\b", "", tail, flags=re.I)
+    found: list[tuple[int, str]] = []
+    taken: list[tuple[int, int]] = []
+    for pattern, role in _COLUMN_ROLES:
+        for m in re.finditer(pattern, tail, re.I):
+            if any(m.start() < end and start < m.end() for start, end in taken):
+                continue  # already claimed by a more specific pattern
+            taken.append(m.span())
+            found.append((m.start(), role))
+    roles = [role for _, role in sorted(found)]
+    if "taxable_value" in roles and "amount" in roles:
+        roles = ["line_total" if r == "amount" else r for r in roles]
+    return roles or None
+
+
 class InvoiceParser:
+    """Parses one document at a time: parse() keeps per-document state, so concurrent callers must
+    each use their own instance."""
+
     def __init__(self, state_codes: StateCodes) -> None:
         self.state_codes = state_codes
+        self._roles: list[str] | None = None
+        self._ambiguous_row = False
+        self._tax_rows: dict[str, list[Decimal]] = {}
+        self._taxable_from_subtotal = False
 
     def parse(self, lines: list[TextLine]) -> ParseResult:
         inv = InvoiceData()
@@ -111,6 +167,9 @@ class InvoiceParser:
         table_started = False
         table_done = False
         pending_name_for: str | None = None
+        self._roles = None
+        self._tax_rows = {h: [] for h in _TAX_HEADS}
+        self._taxable_from_subtotal = False
 
         for line in lines:
             text = line.text.strip()
@@ -131,7 +190,9 @@ class InvoiceParser:
             pending_name_for = None
 
             if _TABLE_HEADER.search(text) and re.search(r"\b(qty|quantity|rate|amount|value|description)\b", text, re.I):
-                table_started, section = True, "items"
+                if not table_started:
+                    self._roles = _column_roles(text)
+                table_started, section = True, "items"  # a header repeated on a later page continues the table
                 continue
 
             if table_started and not table_done:
@@ -142,6 +203,8 @@ class InvoiceParser:
                     if item is not None:
                         inv.line_items.append(item)
                         mark("line_items")
+                        if self._ambiguous_row:
+                            result.uncertain_fields.add("line_items")
                     continue
 
             # Section switches (supplier / recipient blocks).
@@ -163,8 +226,16 @@ class InvoiceParser:
                 elif not name and not re.search(r"gstin", text, re.I):
                     pending_name_for = "supplier_name"
 
-            self._parse_labels(text, section, inv, mark)
+            self._parse_labels(text, section, inv, mark, line.raw_text)
 
+        for head, amounts in self._tax_rows.items():
+            if len(amounts) > 1:
+                setattr(inv, head, sum(amounts, Decimal(0)))
+                result.warnings.append(f"{head.upper()} is printed in {len(amounts)} rows (several rates); "
+                                       "the amounts were added together.")
+        full_text = "\n".join(line.text for line in lines)
+        inv.supply_indicators = sorted({m.group(0).strip() for m in _SPECIAL_SUPPLY.finditer(full_text)},
+                                       key=str.lower)
         if inv.supplier_name is None:
             guess = self._guess_supplier_name(lines)
             if guess:
@@ -172,9 +243,13 @@ class InvoiceParser:
                 result.uncertain_fields.add("supplier_name")
                 result.warnings.append("Supplier name was inferred from the document header.")
         self._finalise_place_of_supply(inv, result)
+        if inv.invoice_number_raw and inv.invoice_number != inv.invoice_number_raw:
+            result.warnings.append(
+                f"Invoice number printed as '{inv.invoice_number_raw}'; only spacing around separators was "
+                f"tidied for checking ('{inv.invoice_number}'). The original is kept in the report.")
         return result
 
-    def _parse_labels(self, text: str, section: str, inv: InvoiceData, mark) -> None:
+    def _parse_labels(self, text: str, section: str, inv: InvoiceData, mark, raw_text: str | None = None) -> None:
         for match in _GSTIN_LABEL.finditer(text):
             value = match.group(1).upper()
             prefix = text[: match.start()].lower()
@@ -189,9 +264,12 @@ class InvoiceParser:
                 mark(target)
 
         if inv.invoice_number is None:
-            m = _INVOICE_NO.search(text)
+            # Read identifiers from the unmodified OCR text, never from the space-restored version.
+            m = _INVOICE_NO.search(raw_text or text)
             if m:
-                inv.invoice_number = m.group(1)
+                raw_number = m.group(1).strip()
+                inv.invoice_number_raw = raw_number
+                inv.invoice_number = normalize_invoice_number(raw_number)
                 mark("invoice_number")
 
         if inv.invoice_date is None and inv.invoice_date_raw is None:
@@ -220,8 +298,10 @@ class InvoiceParser:
 
         lowered = text.lower()
         for field_name, labels in _AMOUNT_LABELS.items():
-            if getattr(inv, field_name) is not None:
-                continue
+            if getattr(inv, field_name) is not None and field_name not in _TAX_HEADS:
+                if not (field_name == "taxable_value" and self._taxable_from_subtotal
+                        and re.search(r"taxable", lowered)):
+                    continue
             match = next((m for lb in labels if (m := _label_regex(lb).search(lowered))), None)
             if match is None:
                 continue
@@ -231,9 +311,16 @@ class InvoiceParser:
             if field_name in ("cgst", "sgst", "igst") and re.search(r"\b(cgst|sgst|igst|utgst)\b.*\b(cgst|sgst|igst|utgst)\b", lowered):
                 continue  # header row naming several tax heads
             amount = _last_amount(text[end:])
-            if amount is not None:
-                setattr(inv, field_name, amount)
-                mark(field_name)
+            if amount is None:
+                continue
+            if field_name in _TAX_HEADS:
+                self._tax_rows[field_name].append(amount)  # one row per rate on multi-rate invoices
+                if getattr(inv, field_name) is not None:
+                    continue
+            setattr(inv, field_name, amount)
+            if field_name == "taxable_value":
+                self._taxable_from_subtotal = "taxable" not in match.group(0)
+            mark(field_name)
 
     def _parse_item_row(self, text: str) -> LineItem | None:
         cells = [c.strip() for c in re.split(r"\s{2,}|\s*\|\s*", text) if c.strip()]
@@ -256,17 +343,32 @@ class InvoiceParser:
             desc, hsn, rest_cells = " ".join(desc_cells), cells[hsn_index], cells[hsn_index + 1:]
 
         item = LineItem(description=desc.strip() or None, hsn_sac=hsn)
-        numbers: list[Decimal] = []
+        self._ambiguous_row = False
+        tokens: list[tuple[Decimal, bool]] = []  # (value, printed with %)
         for cell in rest_cells:
             for part in cell.split():
-                if part.endswith("%"):
-                    item.gst_rate = parse_amount(part.rstrip("%"))
-                    continue
-                value = parse_amount(part)
+                value = parse_amount(part.rstrip("%"))
                 if value is not None:
-                    numbers.append(value)
+                    tokens.append((value, part.endswith("%")))
                 elif re.fullmatch(r"[A-Za-z.]{2,6}", part) and item.unit is None:
                     item.unit = part
+        roles = self._roles or []
+        if roles and len(tokens) == len(roles):
+            # The header says what every column is.
+            for role, (value, _) in zip(roles, tokens):
+                if role in ("quantity", "unit_price", "taxable_value", "gst_rate", "discount"):
+                    setattr(item, role, value)
+            if "taxable_value" not in roles and "amount" in roles:
+                item.taxable_value = tokens[roles.index("amount")][0]
+            return item
+
+        for value, pct in tokens:
+            if pct:
+                item.gst_rate = value
+        numbers = [value for value, pct in tokens if not pct]
+        if len(numbers) > 3 or (roles and len(tokens) != len(roles)):
+            # Columns the header does not explain: keep the positional guess but flag it as uncertain.
+            self._ambiguous_row = True
         if len(numbers) >= 3:
             item.quantity, item.unit_price, item.taxable_value = numbers[0], numbers[1], numbers[2]
         elif len(numbers) == 2:
@@ -285,5 +387,8 @@ class InvoiceParser:
         return None
 
     def _finalise_place_of_supply(self, inv: InvoiceData, result: ParseResult) -> None:
+        if inv.place_of_supply and _EXPORT_POS.search(inv.place_of_supply):
+            inv.place_of_supply_code = "96"  # GST portal code for supplies to other countries
+            return
         if inv.place_of_supply:
             inv.place_of_supply_code = self.state_codes.code_for_name(inv.place_of_supply)

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from app.models.validation import CheckCategory, CheckStatus, Severity, ValidationCheck
+from app.utils.money import fmt_inr
 
 _DEFAULT_SEVERITY = {
     CheckStatus.PASS: Severity.INFO,
@@ -49,7 +50,7 @@ def _fmt(value: object | None) -> str | None:
     if value is None:
         return None
     if isinstance(value, Decimal):
-        return f"{value:,.2f}"
+        return fmt_inr(value)  # same Indian-grouped format as the finding text
     return str(value)
 
 

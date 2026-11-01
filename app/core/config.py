@@ -48,6 +48,26 @@ class Settings(BaseSettings):
     # Calculation tolerance in rupees for rounding differences.
     rounding_tolerance: float = Field(default=1.0, ge=0)
 
+    # Security. "production" refuses to start without API_KEY and hides the interactive docs.
+    environment: str = "development"  # "development" | "production"
+    api_key: SecretStr | None = None  # clients send it as the X-API-Key header
+    enable_docs: bool | None = None  # default: on in development, off in production
+    rate_limit_per_minute: int = Field(default=30, ge=0)  # uploads + validations per client; 0 = off
+    max_concurrent_extractions: int = Field(default=2, ge=1, le=16)
+    extraction_wait_seconds: float = Field(default=30.0, gt=0)
+    max_render_megapixels: float = Field(default=40.0, gt=0)  # caps memory when rendering PDF pages for OCR
+
+    # Retention of uploaded invoices, extraction data and reports. 0 keeps them until deleted.
+    retention_days: int = Field(default=30, ge=0)
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.lower() == "production"
+
+    @property
+    def docs_enabled(self) -> bool:
+        return self.enable_docs if self.enable_docs is not None else not self.is_production
+
     @property
     def max_upload_bytes(self) -> int:
         return int(self.max_upload_mb * 1024 * 1024)

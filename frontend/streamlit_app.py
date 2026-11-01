@@ -31,12 +31,13 @@ CHECK_ICON = {"PASS": "✅", "FAIL": "❌", "MISSING": "⚠️", "WARNING": "⚠
 FIELD_LABELS = [
     ("supplier_name", "Supplier name"), ("supplier_gstin", "Supplier GSTIN"),
     ("recipient_name", "Recipient name"), ("recipient_gstin", "Recipient GSTIN"),
-    ("invoice_number", "Invoice number"), ("invoice_date", "Invoice date"),
+    ("invoice_number", "Invoice number"), ("invoice_number_raw", "Invoice number (as printed)"),
+    ("invoice_date", "Invoice date"),
     ("place_of_supply", "Place of supply"),
 ]
 AMOUNT_LABELS = [
-    ("taxable_value", "Taxable value"), ("cgst", "CGST"), ("sgst", "SGST"), ("igst", "IGST"),
-    ("round_off", "Round-off"), ("total_invoice_value", "Total invoice value"),
+    ("discount", "Discount"), ("taxable_value", "Taxable value"), ("cgst", "CGST"), ("sgst", "SGST"),
+    ("igst", "IGST"), ("round_off", "Round-off"), ("total_invoice_value", "Total invoice value"),
 ]
 
 st.markdown(
@@ -89,9 +90,9 @@ with st.sidebar:
         st.success("Backend connected")
         st.caption(f"OCR engine: **{health.get('ocr_engine') or 'not available'}**")
         if health.get("llm_configured"):
-            st.caption(f"LLM explanations: **on** ({health.get('llm_model')})")
+            st.caption(f"Explanations: **Claude API** ({health.get('llm_model')}); statuses still come from the rules")
         else:
-            st.caption("LLM explanations: **off** — rule-based mode")
+            st.caption("Explanations: **rule-based fallback** (no Claude API key configured)")
         st.caption(f"Reference data: `{health.get('reference_data_version')}`")
     except APIError as exc:
         health = None
@@ -123,12 +124,22 @@ def render_report(report: dict[str, Any], invoice_id: str, key: str = "main") ->
         unsafe_allow_html=True,
     )
     s = report["summary"]
-    cols = st.columns(5)
+    standing = s.get("standing_reminders", len(report.get("standing_reminders", [])))
+    cols = st.columns(6)
     cols[0].metric("Checks run", s["total_checks"])
     cols[1].metric("Passed", s["passed"])
     cols[2].metric("Errors", s["errors"])
     cols[3].metric("Warnings", s["warnings"])
-    cols[4].metric("Manual review", s["manual_review"])
+    cols[4].metric("Review findings", s["manual_review"],
+                   help="Automated checks the rules could not verify. These make the status NEEDS REVIEW.")
+    cols[5].metric("Reminders", standing,
+                   help="Checks a person must always do (GSTIN registration status, e-invoicing, reverse "
+                        "charge, official rates). They apply even when every automated check passes.")
+    st.caption(f"Human verification items in total: **{s.get('manual_verification_total', s['manual_review'] + standing)}** "
+               f"({s['manual_review']} automated finding(s) + {standing} standing reminder(s)).")
+    extraction = report.get("extraction", {})
+    st.caption(f"Extraction: **{extraction.get('method_label', extraction.get('method'))}**  ·  "
+               f"Explanations: **{report.get('explanation_mode', 'rule-based')}**")
     if report.get("llm_note"):
         st.caption(f"ℹ️ {report['llm_note']}")
 
@@ -159,8 +170,22 @@ def render_report(report: dict[str, Any], invoice_id: str, key: str = "main") ->
     left, right = st.columns(2)
     with left:
         st.subheader("Manual verification")
-        for item in report["manual_verification"]:
+        findings = report.get("manual_review_findings")
+        reminders = report.get("standing_reminders")
+        if findings is None or reminders is None:  # reports saved before this split
+            findings, reminders = [], report["manual_verification"]
+        st.markdown(f"**Automated manual-review findings ({len(findings)})**")
+        if not findings:
+            st.caption("None from the automated checks; the standing reminders below still apply.")
+        for item in findings:
             st.markdown(f"- {item}")
+        st.markdown(f"**Standing verification reminders ({len(reminders)})**")
+        for item in reminders:
+            st.markdown(f"- {item}")
+        if report.get("gstin_registration"):
+            st.markdown("**GSTIN registration status**")
+            for party, status in report["gstin_registration"].items():
+                st.markdown(f"- {party.capitalize()}: {status}")
     with right:
         st.subheader("Assumptions")
         for item in report["assumptions"]:
@@ -187,10 +212,11 @@ def render_report(report: dict[str, Any], invoice_id: str, key: str = "main") ->
 def render_extraction(extraction: dict[str, Any]) -> None:
     inv = extraction["invoice"]
     status = extraction["status"]
-    method = {"pdf_text": "PDF text layer", "ocr": "OCR", "mixed": "PDF text + OCR"}.get(extraction["method"],
-                                                                                         extraction["method"])
-    engine = f" ({extraction['ocr_engine']})" if extraction.get("ocr_engine") else ""
-    st.caption(f"Extraction: **{status}** via {method}{engine}")
+    method = extraction.get("method_label") or extraction["method"]
+    st.caption(f"Extraction: **{status}** via {method}")
+    if extraction.get("ocr_used"):
+        st.warning("Text was recognised by OCR, not read from a digital text layer. OCR can misread "
+                   "characters (e.g. 0/O, 1/I, 5/S); compare key values with the preview.")
     if extraction.get("error"):
         st.error(extraction["error"])
     for warning in extraction.get("warnings", []):
@@ -228,7 +254,8 @@ def corrections_form(invoice_id: str, extraction: dict[str, Any]) -> None:
         with st.form(f"corrections-{invoice_id}"):
             values: dict[str, Any] = {}
             c1, c2 = st.columns(2)
-            for i, (key, label) in enumerate(FIELD_LABELS):
+            editable = [(k, lbl) for k, lbl in FIELD_LABELS if k != "invoice_number_raw"]  # audit value: read-only
+            for i, (key, label) in enumerate(editable):
                 target = c1 if i % 2 == 0 else c2
                 values[key] = target.text_input(label, value=str(inv.get(key) or ""),
                                                 help="Date format: YYYY-MM-DD" if key == "invoice_date" else None)
@@ -237,7 +264,7 @@ def corrections_form(invoice_id: str, extraction: dict[str, Any]) -> None:
                 values[key] = a_cols[i % 3].text_input(label, value=str(inv.get(key) or ""))
             items = pd.DataFrame(inv.get("line_items") or [],
                                  columns=["description", "hsn_sac", "quantity", "unit", "unit_price",
-                                          "taxable_value", "gst_rate"])
+                                          "discount", "taxable_value", "gst_rate"])
             edited = st.data_editor(items, num_rows="dynamic", use_container_width=True, key=f"items-{invoice_id}")
             submitted = st.form_submit_button("Re-validate with corrections", type="primary")
         if submitted:
@@ -341,3 +368,22 @@ with tab_history:
                         render_report(client.report(choice), choice, key="history")
                     except APIError as exc:
                         st.error(str(exc))
+            st.divider()
+            st.subheader("Delete an invoice")
+            st.caption("Removes the uploaded file, extracted data and saved reports. Invoices are also "
+                       "deleted automatically after the configured retention period.")
+            to_delete = st.selectbox("Invoice to delete", options=[h["invoice_id"] for h in history],
+                                     format_func=lambda i: next(f"{h['original_filename']} ({i[:8]})"
+                                                                for h in history if h["invoice_id"] == i),
+                                     key="delete-choice")
+            confirm = st.checkbox("I understand this cannot be undone", key="delete-confirm")
+            if st.button("Delete invoice", disabled=not confirm, key="delete-button"):
+                try:
+                    client.delete(to_delete)
+                    if st.session_state.get("invoice_id") == to_delete:
+                        for k in ("invoice_id", "extraction", "report", "file_key"):
+                            st.session_state.pop(k, None)
+                    st.success("Invoice deleted.")
+                    st.rerun()
+                except APIError as exc:
+                    st.error(f"Delete failed: {exc}")

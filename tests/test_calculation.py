@@ -41,8 +41,12 @@ def test_incorrect_gst_amount(engine):
     result = run(engine, intra_state_invoice(cgst=D("12000"), sgst=D("12000"), total_invoice_value=D("174000")))
     checks = checks_by_id(result)
     assert checks["calc.total_tax"].status is CheckStatus.FAIL
-    assert checks["calc.total_tax"].expected == "27,000.00"
-    assert checks["calc.invoice_total"].status is CheckStatus.PASS  # total is consistent with what was charged
+    assert checks["calc.total_tax"].expected == "₹27,000.00"
+    # The printed total adds up on its own figures...
+    assert checks["calc.invoice_total"].status is CheckStatus.PASS
+    # ...but not against the GST that is actually due.
+    assert checks["calc.invoice_total_expected"].status is CheckStatus.FAIL
+    assert checks["calc.invoice_total_expected"].expected == "₹1,77,000.00"
 
 
 def test_igst_correct_for_inter_state(engine):
@@ -76,7 +80,8 @@ def test_incorrect_invoice_total(engine):
     result = run(engine, intra_state_invoice(total_invoice_value=D("180000")))
     check = checks_by_id(result)["calc.invoice_total"]
     assert check.status is CheckStatus.FAIL
-    assert check.expected == "177,000.00"
+    assert check.expected == "₹1,77,000.00"
+    assert checks_by_id(result)["calc.invoice_total_expected"].status is CheckStatus.FAIL
     assert result.overall_status is OverallStatus.INVALID
 
 

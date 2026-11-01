@@ -23,11 +23,13 @@ Checking all of this by hand is slow and easy to get wrong. This project automat
 | Area | What it does |
 |---|---|
 | **Upload** | PDF, PNG and JPG files up to 10 MB. Files are checked by their magic bytes (not the extension), corrupted or password-protected files are rejected, and every file is stored under a server-generated UUID name. |
-| **Extraction** | Uses the PDF text layer when it exists and falls back to OCR for scans and images. The rule-based parser handles Indian number formats (`1,77,000.00`) and day-first dates. Fields it cannot find stay **missing** and are never guessed. Low-confidence OCR fields are marked **uncertain**. |
+| **Extraction** | Uses the PDF text layer when it exists and falls back to OCR for scans and images. Every result states which one was used (`method_label`, `ocr_used`, `ocr_pages`), so digital text is never presented as OCR or the reverse. The parser maps item-table columns from the table header (quantity, price, discount, taxable value, GST %), follows tables across pages, adds up per-rate CGST/SGST/IGST rows, and reads invoice-level discounts. Fields it cannot find stay **missing** and are never guessed. Low-confidence OCR values and rows that do not match the header are marked **uncertain** and go to manual review. |
+| **Invoice numbers** | Numbers with spaces, slashes and hyphens (`INV / 2026 / 001`, `GST 001`) are read in full. The original is kept as printed (`invoice_number_raw`); only spacing around separators is tidied for display (`INV/2026/001`). A comparison key (upper case, spaces removed, `/` and `-` kept) is used to flag **possible duplicates** from the same supplier in the same financial year. Records are never merged. |
 | **AI-assisted extraction (optional)** | An LLM may fill fields the parser missed. Each value must appear **verbatim in the document text** or it is discarded, so the LLM cannot introduce data. Accepted values are marked uncertain and sent to manual review. |
 | **GSTIN validation** | Checks presence, length/format (state code + PAN + entity code + `Z` + checksum), the state/UT code, and the base-36 checksum. **Format errors and checksum errors are reported as separate checks.** |
 | **HSN/SAC & rates** | Looks up codes against a versioned reference file using longest-prefix matching. It flags missing, malformed and unknown codes, compares rates with high-confidence entries, sends low-confidence entries to **manual review**, and treats invoices dated before the dataset's effective date as unverifiable. |
-| **Tax calculations** | Checks quantity × price, the sum of line values, the supply type (intra-state vs inter-state, from the supplier's GSTIN state and the place of supply), the tax head charged, CGST = SGST, the expected CGST/SGST/IGST, total tax, round-off, and the invoice total, all within a configurable rounding tolerance. |
+| **Tax calculations** | Checks quantity × price (less any line discount), the sum of line values (less any invoice discount), the supply type, the tax head charged, CGST = SGST, the expected CGST/SGST/IGST, total tax and round-off. The invoice total is checked **twice, as two separately labelled checks**: *Invoice total vs printed components* (does the printed total equal the printed taxable value + printed GST?) and *Invoice total vs expected GST* (does it equal the taxable value + GST recomputed from line values and rates, the same figures the CGST/SGST/IGST checks use?). A rate is never worked back from the tax charged, because that check would always agree with itself. |
+| **Place of supply** | Intra- vs inter-state is decided from the supplier's GSTIN state and the place of supply. Exports (place of supply 96), SEZ supplies, deemed exports and LUT/bond wording are **not classified automatically**; they go to manual review and the domestic tax checks are skipped. A recipient registered in a different state from the place of supply (bill-to/ship-to or special service rules) is also sent to manual review. |
 | **Agent** | A 6-step workflow: receive → run deterministic rules → collect findings → explain (LLM or templates) → suggest corrections → build the report. The LLM **cannot change any status**. |
 | **Report** | Overall `VALID` / `INVALID` / `NEEDS REVIEW` status, counts, extracted data, every check, explanations, corrections, manual-verification items, assumptions and the agent trace. Exports to JSON, Markdown and HTML. |
 | **Dashboard** | Streamlit UI with upload, invoice preview, extracted fields, a form to correct values and re-validate, the issues list, a table of all checks, report downloads and processing history (SQLite). |
@@ -40,9 +42,16 @@ Checking all of this by hand is slow and easy to get wrong. This project automat
 | `FAIL` | Invalid information (error) |
 | `MISSING` | Information not found on the invoice |
 | `WARNING` | Suspicious or inconsistent information |
-| `MANUAL_REVIEW` | Cannot be verified automatically (for example, a low-confidence rate or an unknown supply type) |
+| `MANUAL_REVIEW` | Cannot be verified automatically (for example, a low-confidence or unknown rate, a special supply, or an uncertain OCR value) |
 
 Overall status: any **error** gives `INVALID`. Otherwise, any warning, missing item or manual-review item gives `NEEDS REVIEW`. If every check passed, the status is `VALID`.
+
+`VALID` means **every automated check passed**; it never means "nothing left for a person to do". Reports count two kinds of human work separately:
+
+- **Manual-review findings**: automated checks that could not be verified (status `MANUAL_REVIEW`). These make the status `NEEDS REVIEW`.
+- **Standing verification reminders**: things the tool can never verify, listed on every report. They cover each GSTIN's registration and active status (there is no authorised live GST portal / GSP integration, so a GSTIN is never reported as active), e-invoicing, reverse charge, confirming rates against CBIC notifications, and re-checking OCR values when OCR was used.
+
+The dashboard, JSON, Markdown and HTML reports all show both counts and their total, so the manual-review figure is never a bare zero.
 
 ## Architecture
 
@@ -105,7 +114,7 @@ sequenceDiagram
 | LLM | **Claude** (`claude-opus-5-5`) through the official **Anthropic Python SDK** | Uses structured JSON output (`output_config.format`), low effort for short explanations, and server-side refusal fallback. It is fully optional. |
 | Storage | **SQLite** (standard library) | No extra service is needed for processing history. |
 | Frontend | **Streamlit** | A clean data UI built quickly in Python. It talks to the backend only over HTTP. |
-| Tests | **pytest**, FastAPI `TestClient` | 110 tests covering units, integration and the API. |
+| Tests | **pytest**, FastAPI `TestClient` | 199 tests covering units, integration and the API. |
 
 ## Folder structure
 
@@ -114,7 +123,8 @@ gst-invoice-checker-agent/
 ├── app/
 │   ├── main.py                 # FastAPI app factory + error handlers
 │   ├── api/                    # routes.py (endpoints), dependencies.py (service wiring)
-│   ├── core/                   # config.py (settings), logging.py (PII redaction), exceptions.py
+│   ├── core/                   # config.py (settings), logging.py (PII redaction), exceptions.py,
+│   │                           # security.py (API key, rate limit, body limit, headers)
 │   ├── models/                 # invoice.py, validation.py (report), api.py (HTTP schemas)
 │   ├── services/               # file_service, document_reader, ocr_service, invoice_parser,
 │   │                           # extraction_service, reference_data, storage, report_service,
@@ -122,7 +132,8 @@ gst-invoice-checker-agent/
 │   ├── validators/             # gstin, gstin_rules, hsn, calculation, fields, engine, base
 │   ├── agent/                  # invoice_agent (workflow + guardrails), llm_client,
 │   │                           # llm_extraction (grounded), prompts
-│   └── utils/                  # money (Decimal/₹ helpers), sample_invoice (synthetic renderer)
+│   └── utils/                  # money (Decimal/₹ helpers), invoice_number (normalisation),
+│                               # sample_invoice (synthetic renderer)
 ├── frontend/
 │   ├── streamlit_app.py        # dashboard
 │   └── api_client.py           # HTTP client for the backend
@@ -179,6 +190,13 @@ Copy `.env.example` to `.env` and adjust as needed. Every setting has a working 
 | `MAX_PDF_PAGES` | `10` | Maximum number of PDF pages processed. |
 | `ROUNDING_TOLERANCE` | `1.0` | Differences up to this amount in rupees are treated as rounding. |
 | `API_BASE_URL` | `http://127.0.0.1:8000` | Backend URL used by the Streamlit app. |
+| `ENVIRONMENT` | `development` | `production` refuses to start without `API_KEY` and hides `/docs`. |
+| `API_KEY` | *(empty)* | When set, every `/invoices` endpoint requires the `X-API-Key` header. The Streamlit app sends the same `API_KEY` from its environment. |
+| `ENABLE_DOCS` | on in development | Interactive API docs at `/docs`. |
+| `RATE_LIMIT_PER_MINUTE` | `30` | Uploads + validations per client address per minute (`0` turns it off). |
+| `MAX_CONCURRENT_EXTRACTIONS` | `2` | OCR jobs allowed at once; extra requests wait up to `EXTRACTION_WAIT_SECONDS`, then get **503**. |
+| `MAX_RENDER_MEGAPIXELS` | `40` | Upper bound on the bitmap rendered from one PDF page for OCR. |
+| `RETENTION_DAYS` | `30` | Uploaded files, extracted data and reports older than this are deleted (at start-up and on each upload). `0` keeps them until deleted. |
 
 Secrets are read only from the environment. Never commit `.env`; it is already in `.gitignore`.
 
@@ -217,6 +235,9 @@ python scripts/demo_workflow.py data/sample_invoices/invalid_gst_errors.pdf
 | `GET` | `/invoices/{invoice_id}/report?format=json\|markdown\|html` | The validation report. Returns **404** until the invoice has been validated. |
 | `GET` | `/invoices/{invoice_id}/file` | The originally uploaded file (used for preview). |
 | `GET` | `/invoices?limit=50` | Processing history. |
+| `DELETE` | `/invoices/{invoice_id}` | Deletes the uploaded file, extracted data and saved reports. **204** |
+
+Invoice IDs must be server-generated UUIDs; anything else is rejected with **422** before it reaches storage. When `API_KEY` is set, every `/invoices` endpoint needs the `X-API-Key` header (`/health` stays open for probes).
 
 Errors use a consistent shape that never echoes invoice data:
 
@@ -227,10 +248,13 @@ Errors use a consistent shape that never echoes invoice data:
 | Code | When |
 |---|---|
 | 400 | Empty, corrupted, mislabelled or password-protected file |
+| 401 | Missing or wrong `X-API-Key` (only when `API_KEY` is configured) |
 | 404 | Unknown invoice, or report not generated yet |
-| 413 | File too large |
+| 413 | File too large (refused before the body is buffered) |
 | 415 | Unsupported extension |
-| 422 | Malformed request |
+| 422 | Malformed request or invoice ID |
+| 429 | Rate limit exceeded |
+| 503 | Too many OCR jobs running; try again |
 
 Example:
 
@@ -252,7 +276,7 @@ curl "http://127.0.0.1:8000/invoices/<invoice_id>/report?format=markdown"
 python -m pytest
 ```
 
-The suite has 110 tests and runs in about 11 seconds, including real OCR on rendered invoice images. It covers:
+The suite has 199 tests and runs in about 22 seconds, including real OCR on rendered invoice images. It covers:
 
 | Area | File |
 |---|---|
@@ -264,6 +288,12 @@ The suite has 110 tests and runs in about 11 seconds, including real OCR on rend
 | Invalid / corrupted / oversized / mislabelled uploads, path traversal in file names | `tests/test_file_validation.py` |
 | LLM unavailable fallback, LLM failure, guardrails (no status override, no invented rates, no compliance claims) | `tests/test_agent.py` |
 | End-to-end API workflow, corrections, error codes | `tests/test_api.py` |
+| The audited ₹1,07,000 example (expected CGST/SGST ₹6,780 each, expected total ₹1,20,560), printed-vs-expected totals, no circular rate derivation, discounts, de-duplication | `tests/test_regressions_calculation.py` |
+| Manual-review vs standing reminders, GSTIN registration never "active", OCR-misread GSTINs, HSN metadata, unknown/low-confidence rates, exports/SEZ/place-of-supply rules | `tests/test_regressions_review.py` |
+| Multi-page and multi-rate invoices, discounts, header-mapped columns, unusual labels, PDF-text vs OCR labelling, render cap | `tests/test_extraction_layouts.py` |
+| Invoice number formats (`INV/2026/001`, `INV / 2026 / 001`, `INV-2026-001`, `GST 001`, `GST001`), OCR not altering numbers, duplicate detection, DB migration | `tests/test_invoice_number.py` |
+| API key, production start-up guard, rate limit, body-size limit, busy limit, security headers, deletion, retention | `tests/test_security.py` |
+| JSON / Markdown / HTML agreement on statuses, totals and counts; Claude vs rule-based fallback labelling | `tests/test_report_consistency.py` |
 
 All test data is synthetic. The GSTINs are generated from made-up PANs with a valid checksum, and none of it is used as GST reference data.
 
@@ -297,12 +327,12 @@ STEP 5 - Final validation report
 
 ## Reference data
 
-`data/reference/hsn_sac_rates.json` is a **sample** dataset. It has a version (`2025.09-sample-v1`), an effective date (`2025-09-22`, the date of the GST rate rationalisation), a source note and an explicit "not legally authoritative" status. Each entry has a `confidence` level:
+`data/reference/hsn_sac_rates.json` is a **sample** dataset. It has a version (`2025.09-sample-v2`), an effective date (`2025-09-22`, the date of the GST rate rationalisation), a source note and an explicit "not legally authoritative" status. Each entry also carries its own `effective_from`, `source` and `notification_ref`. `notification_ref` is `null` for every entry: none has yet been verified against the text of a specific notification, and the reports say so. Each entry has a `confidence` level:
 
 - `high`: a long-standing standard rate. A mismatch is reported as an error.
 - `low`: a conditional or recently changed rate. Any comparison against it goes to manual review.
 
-Codes not in the file produce a warning; the tool never guesses a rate for them. To extend the dataset, verify each rate against the current CBIC notifications, add the entry, and bump `version`.
+Codes not in the file go to **manual review**; the tool never guesses a rate for them. A rate that matches a high-confidence entry passes, and the result says the match is against the local, non-authoritative dataset. To extend the dataset, verify each rate against the current CBIC notifications, add the entry, and bump `version`.
 
 ## Security and reliability
 
@@ -313,13 +343,35 @@ Codes not in the file produce a warning; the tool never guesses a rate for them.
 - OCR and LLM failures are caught and turned into an `extraction_failed` result or a rule-based fallback; they never crash a request.
 - The document text sent to the LLM is treated as untrusted data, and the prompts tell the model to ignore any instructions inside it.
 
+### Protections in the API
+
+| Risk | Protection |
+|---|---|
+| Unrestricted access | Optional API key (`X-API-Key`, constant-time comparison) on every `/invoices` endpoint. `ENVIRONMENT=production` will not start without one. Without a key the server logs a warning; keep it bound to `127.0.0.1`. |
+| Upload abuse | Magic-byte, size, page-count, decode and encryption checks. Request bodies over the limit get **413** from middleware before they are buffered (chunked bodies are counted too). |
+| Resource exhaustion | Per-client rate limit on upload and validate, a cap on concurrent OCR jobs (**503** when busy), OCR run off the event loop, a page limit, and a pixel cap when rendering PDF pages. |
+| Data exposure | `Cache-Control: no-store` on invoice responses, `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy` on everything, and a strict `Content-Security-Policy` on HTML reports. API docs are off in production. |
+| Retention | `RETENTION_DAYS` deletes old uploads, extracted data and reports automatically. `DELETE /invoices/{id}` (and the History tab) deletes one on request. |
+
+### Before any public deployment
+
+This project has been run and tested locally only. It has **not** been deployed or load-tested, and these protections are not a substitute for a security review. At minimum:
+
+1. Set `ENVIRONMENT=production` and a long random `API_KEY`, and pass the key to the Streamlit app.
+2. Put the API behind a TLS-terminating reverse proxy. Do not expose uvicorn directly.
+3. The rate limiter and history live in one process: run a single worker, or replace them with a shared store (for example Redis and Postgres).
+4. One shared API key gives every caller access to every invoice. For several users, add real user accounts with per-user access to invoices.
+5. Decide on a retention period that meets your legal record-keeping duties, and back up or encrypt the database and upload folder.
+6. If `ANTHROPIC_API_KEY` is set, extracted findings and, for AI-assisted extraction, document text are sent to the Claude API. Make sure that is acceptable for your invoices.
+
 ## Limitations
 
-- **The rule-based parser is tuned to common labelled layouts** (for example `Invoice No:`, `GSTIN:`, `Place of Supply:`, or a table with an HSN column). Unusual layouts, rotated scans, handwritten invoices and multi-row line items may lose fields. Lost fields show up as *missing*, never as invented values, and can be corrected in the UI.
+- **The rule-based parser is tuned to common labelled layouts** (for example `Invoice No:`, `GSTIN:`, `Place of Supply:`, or a table with an HSN column). Multi-page tables, header-mapped columns, discounts and per-rate tax rows are handled and tested on synthetic invoices. Rotated scans, handwritten invoices, descriptions that wrap onto a second line, and tables without an HSN column have not been tested and may lose fields. Lost fields show up as *missing*, never as invented values, and can be corrected in the UI.
 - **OCR may merge words.** RapidOCR sometimes drops spaces; camel-case word boundaries are restored, but lower-case runs such as `softwaredevelopment` stay merged.
-- **Reference rates are a small sample** and are not legally authoritative. The status of a GSTIN on the GST portal (active, cancelled or suspended), e-invoice/IRN applicability and reverse charge are not checked automatically; they are always listed under manual verification.
-- **Supply-type rules are simplified.** The tool compares the supplier's state with the place of supply. SEZ supplies, exports, deemed exports and special place-of-supply rules for services are not modelled.
-- **Discounts, cess, TCS and multi-rate split lines** are not modelled.
+- **Reference rates are a small sample** (22 entries) and are not legally authoritative; no entry is linked to a verified notification. GSTIN registration status (active, cancelled or suspended), e-invoice/IRN applicability and reverse charge are not checked automatically; they are always listed as standing reminders.
+- **Special supplies are detected, not modelled.** Exports, SEZ supplies, deemed exports and LUT/bond supplies are recognised only from the place of supply (96/97) or explicit wording on the invoice, and then sent to manual review. If an invoice gives no such hint, it is classified by supplier state vs place of supply.
+- **Not modelled:** cess, TCS, reverse-charge tax amounts, and an invoice-level discount spread across several GST rates (that case goes to manual review).
+- **Duplicate detection** only sees invoices processed by this instance, after they have been validated. It ignores letter case and spacing, so `GST 001` and `GST001` from the same supplier are flagged as a *possible* duplicate for a person to decide.
 - **The LLM path is tested with fake clients only.** No API key was available during development, so the real Claude API call has not been exercised end to end. Without a key the app is fully functional in rule-based mode.
 
 ## Features that need external API keys
@@ -338,4 +390,4 @@ Everything else, including OCR, all validations, reports and the dashboard, runs
 - Add a layout-aware extraction model for arbitrary invoice formats, and support multi-page line items.
 - Build a full HSN/SAC rate table with effective-date history, loaded from official CBIC notifications.
 - Process invoices in batches and reconcile them against GSTR-2B.
-- Add authentication and multi-user history for hosted deployments.
+- Add per-user accounts and access control for hosted deployments (the current API key is a single shared secret).

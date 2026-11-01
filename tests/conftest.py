@@ -24,6 +24,15 @@ TODAY = date(2026, 11, 2)
 D = Decimal
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    from app.core.security import rate_limiter
+
+    rate_limiter.reset()
+    yield
+    rate_limiter.reset()
+
+
 @pytest.fixture(scope="session")
 def hsn_ref():
     return get_hsn_reference()
@@ -97,7 +106,7 @@ def checks_by_id(result) -> dict[str, Any]:
 def make_service(tmp_path: Path, hsn_ref, state_codes):
     """Builds an isolated InvoiceService (temp DB/uploads/reports, no real LLM by default)."""
 
-    def _make(ocr_engine=None, llm=None) -> InvoiceService:
+    def _make(ocr_engine=None, llm=None, **overrides: Any) -> InvoiceService:
         settings = Settings(
             _env_file=None,
             data_dir=tmp_path,
@@ -105,6 +114,7 @@ def make_service(tmp_path: Path, hsn_ref, state_codes):
             reports_dir=tmp_path / "reports",
             database_path=tmp_path / "test.db",
             anthropic_api_key=None,
+            **overrides,
         )
         settings.ensure_directories()
         extractor = ExtractionService(ocr_engine, llm, state_codes)

@@ -46,5 +46,20 @@ class ReportNotFoundError(AppError):
     code = "report_not_found"
 
 
+class AuthenticationRequiredError(AppError):
+    status_code = 401
+    code = "authentication_required"
+
+
+class RateLimitedError(AppError):
+    status_code = 429
+    code = "rate_limited"
+
+
+class ServiceBusyError(AppError):
+    status_code = 503
+    code = "service_busy"
+
+
 class LLMError(Exception):
     """Raised by LLM clients; always caught by the agent and replaced by the fallback."""

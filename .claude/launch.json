@@ -5,13 +5,15 @@
       "name": "gst-api",
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
-      "port": 8000
+      "port": 8000,
+      "autoPort": false
     },
     {
       "name": "gst-frontend",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "streamlit", "run", "frontend/streamlit_app.py", "--server.port", "8501", "--server.headless", "true", "--browser.gatherUsageStats", "false"],
-      "port": 8501
+      "runtimeArgs": ["-m", "streamlit", "run", "frontend/streamlit_app.py", "--server.address", "127.0.0.1", "--server.port", "8502", "--server.headless", "true", "--browser.gatherUsageStats", "false"],
+      "port": 8502,
+      "autoPort": false
     }
   ]
 }

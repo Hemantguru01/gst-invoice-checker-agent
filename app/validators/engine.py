@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
-from app.models.invoice import ExtractionResult, ExtractionStatus
+from app.models.invoice import ExtractionResult, ExtractionStatus, FieldSource
 from app.models.validation import (
     CheckCategory,
     CheckStatus,
@@ -16,6 +16,7 @@ from app.models.validation import (
     ValidationSummary,
 )
 from app.services.reference_data import HSNReference, StateCodes
+from app.services.storage import DuplicateCandidate
 from app.validators.base import RuleOutput, make_check
 from app.validators.calculation import check_calculations
 from app.validators.fields import check_fields
@@ -38,7 +39,9 @@ class RuleEngine:
         self.state_codes = state_codes
         self.tolerance = Decimal(str(rounding_tolerance))
 
-    def run(self, extraction: ExtractionResult, today: date | None = None) -> RuleEngineResult:
+    def run(self, extraction: ExtractionResult, today: date | None = None,
+            duplicates: list[DuplicateCandidate] | None = None) -> RuleEngineResult:
+        """`duplicates` is None when no history lookup was made (then no duplicate check is reported)."""
         out = RuleOutput()
         if extraction.status is ExtractionStatus.FAILED:
             out.add(make_check(
@@ -51,7 +54,10 @@ class RuleEngine:
 
         invoice = extraction.invoice
         out.extend(check_fields(extraction, today))
-        gstin_out, supplier, _ = check_gstins(invoice, self.state_codes.codes)
+        if duplicates is not None:
+            out.add(_duplicate_check(extraction, duplicates))
+        ocr_fields = {f for f, src in extraction.field_sources.items() if src is FieldSource.OCR}
+        gstin_out, supplier, recipient = check_gstins(invoice, self.state_codes.codes, ocr_fields)
         out.extend(gstin_out)
         if invoice.place_of_supply and not invoice.place_of_supply_code:
             out.add(make_check(
@@ -63,7 +69,7 @@ class RuleEngine:
             ))
         out.extend(check_hsn(invoice, self.hsn_reference))
         out.extend(check_calculations(invoice, supplier, self.hsn_reference, self.state_codes.codes,
-                                      self.tolerance))
+                                      self.tolerance, recipient))
 
         checks = _dedupe(out.checks)
         return RuleEngineResult(
@@ -74,15 +80,49 @@ class RuleEngine:
         )
 
 
+_STATUS_RANK = {CheckStatus.PASS: 0, CheckStatus.WARNING: 1, CheckStatus.MANUAL_REVIEW: 2,
+                CheckStatus.MISSING: 3, CheckStatus.FAIL: 4}
+_SEVERITY_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.ERROR: 2}
+
+
+def _duplicate_check(extraction: ExtractionResult, duplicates: list[DuplicateCandidate]) -> ValidationCheck:
+    inv = extraction.invoice
+    name = "Duplicate invoice number"
+    if not duplicates:
+        return make_check("fields.invoice_number.duplicate", CheckCategory.FIELDS, name, CheckStatus.PASS,
+                          f"No other processed invoice from this supplier uses invoice number "
+                          f"'{inv.invoice_number}' in the same financial year.", field="invoice_number")
+    printed = inv.invoice_number_raw or inv.invoice_number
+    matches = []
+    for d in duplicates:
+        how = "identical" if d.invoice_number_raw == printed else f"printed as '{d.invoice_number_raw}'"
+        matches.append(f"'{d.original_filename}' uploaded {d.uploaded_at:%Y-%m-%d %H:%M} UTC ({how})")
+    return make_check(
+        "fields.invoice_number.duplicate", CheckCategory.FIELDS, name, CheckStatus.WARNING,
+        f"Invoice number '{printed}' from this supplier was already processed: {'; '.join(matches)}. "
+        f"Numbers were compared as '{inv.invoice_number_key}' (case and spacing ignored; '/' and '-' kept).",
+        field="invoice_number", actual=printed,
+        explanation="A supplier must use a unique invoice number within a financial year (CGST Rule 46). "
+                    "The same number twice can mean a re-upload, a duplicate claim, or two different invoices "
+                    "whose numbers differ only in spacing or letter case. The records are not merged.",
+        suggestion="Compare both invoices. If they are the same document, avoid claiming input tax credit twice; "
+                   "if they differ, ask the supplier why the number was reused.",
+    )
+
+
 def _dedupe(checks: list[ValidationCheck]) -> list[ValidationCheck]:
-    """Keep only the first result for a repeated check ID."""
+    """Keep one result per check ID: the most severe, so a repeat can never hide a problem."""
     seen: dict[str, int] = {}
     result: list[ValidationCheck] = []
     for check in checks:
-        if check.check_id in seen:
+        if check.check_id not in seen:
+            seen[check.check_id] = len(result)
+            result.append(check)
             continue
-        seen[check.check_id] = len(result)
-        result.append(check)
+        kept = result[seen[check.check_id]]
+        if (_SEVERITY_RANK[check.severity], _STATUS_RANK[check.status]) > \
+                (_SEVERITY_RANK[kept.severity], _STATUS_RANK[kept.status]):
+            result[seen[check.check_id]] = check
     return result
 
 

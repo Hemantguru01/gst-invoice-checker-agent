@@ -20,6 +20,9 @@ class HSNEntry:
     gst_rate: Decimal
     confidence: str  # "high" | "low"
     notes: str | None = None
+    effective_from: date | None = None
+    source: str | None = None
+    notification_ref: str | None = None  # null until verified against the official notification
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,9 @@ def load_hsn_reference(path: Path) -> HSNReference:
             gst_rate=Decimal(str(e["gst_rate"])),
             confidence=e.get("confidence", "low"),
             notes=e.get("notes"),
+            effective_from=date.fromisoformat(e.get("effective_from") or meta["effective_from"]),
+            source=e.get("source"),
+            notification_ref=e.get("notification_ref"),
         )
         for e in raw["entries"]
     }

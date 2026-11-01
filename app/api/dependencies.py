@@ -27,6 +27,7 @@ def get_invoice_service() -> InvoiceService:
         get_ocr_engine(settings.ocr_engine, settings.tesseract_cmd), llm, states,
         dpi=settings.ocr_render_dpi, max_pages=settings.max_pdf_pages,
         llm_assisted=settings.llm_assisted_extraction,
+        max_render_pixels=int(settings.max_render_megapixels * 1_000_000),
     )
     agent = InvoiceCheckerAgent(RuleEngine(hsn, states, settings.rounding_tolerance), hsn, llm)
     return InvoiceService(settings, InvoiceRepository(settings.database_path), FileStore(settings.upload_dir),
