@@ -8,6 +8,15 @@ venv/
 
 # Secrets
 .env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.*
+credentials*.json
 
 # Runtime data (private invoices and generated reports)
 data/uploads/*
